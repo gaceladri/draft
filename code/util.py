@@ -5,8 +5,87 @@ import six
 import functools
 import math
 
+from tensor2tensor import common_attention, common_layers
 
 DEFAULT_DEV_STRING = "existing_device"
+
+
+def transformer_prepare_encoder(inputs, hparams, features=None):
+    """Prepare one shard of the model for the encoder.
+
+    Args:
+      inputs: a Tensor.
+      hparams: run hyperparameters
+      features: optionally pass the entire features dictionary as well.
+        This is needed now for "packed" datasets.
+
+    Returns:
+      encoder_input: a Tensor, bottom of encoder stack
+      encoder_self_attention_bias: a bias tensor for use in encoder self-attention
+      encoder_decoder_attention_bias: a bias tensor for use in encoder-decoder
+        attention
+    """
+    ishape_static = inputs.shape.as_list()
+    encoder_input = inputs
+
+    # Usual case - not a packed dataset.
+    encoder_padding = common_attention.embedding_to_padding(encoder_input)
+    ignore_padding = common_attention.attention_bias_ignore_padding(
+        encoder_padding)
+    encoder_self_attention_bias = ignore_padding
+    encoder_decoder_attention_bias = ignore_padding
+    inputs_position = None
+    if hparams.proximity_bias:
+        encoder_self_attention_bias += common_attention.attention_bias_proximal(
+            common_layers.shape_list(inputs)[1])
+
+    if inputs_position is not None:
+        encoder_input = common_attention.add_timing_signal_1d_given_position(
+            encoder_input, inputs_position)
+    else:
+        encoder_input = common_attention.add_timing_signal_1d(
+            encoder_input)
+    return (encoder_input, encoder_self_attention_bias,
+            encoder_decoder_attention_bias)
+
+
+def transformer_prepare_decoder(targets, hparams, features=None):
+    """Prepare one shard of the model for the decoder.
+
+    Args:
+      targets: a Tensor.
+      hparams: run hyperparameters
+      features: optionally pass the entire features dictionary as well.
+        This is needed now for "packed" datasets.
+
+    Returns:
+      decoder_input: a Tensor, bottom of decoder stack
+      decoder_self_attention_bias: a bias tensor for use in decoder self-attention
+    """
+    if hparams.causal_decoder_self_attention:
+        # Causal attention.
+        if hparams.prepend_mode == "prepend_inputs_full_attention":
+            decoder_self_attention_bias = (
+                common_attention.attention_bias_prepend_inputs_full_attention(
+                    common_attention.embedding_to_padding(targets)))
+        else:
+            decoder_self_attention_bias = (
+                common_attention.attention_bias_lower_triangle(
+                    common_layers.shape_list(targets)[1]))
+    else:
+        # Full attention.
+        decoder_padding = common_attention.embedding_to_padding(targets)
+        decoder_self_attention_bias = (
+            common_attention.attention_bias_ignore_padding(decoder_padding))
+            
+    if hparams.proximity_bias:
+        decoder_self_attention_bias += common_attention.attention_bias_proximal(
+            common_layers.shape_list(targets)[1])
+    decoder_input = common_layers.shift_right_3d(targets)
+    decoder_input = common_attention.add_timing_signal_1d(
+        decoder_input)
+
+    return (decoder_input, decoder_self_attention_bias)
 
 
 def conv_internal(conv_fn, inputs, filters, kernel_size, **kwargs):

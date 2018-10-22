@@ -327,6 +327,8 @@ def feedforward(inputs,
 
         # Normalize
         outputs = normalize(outputs)
+    
+    return outputs
 
 
 def label_smoothing(inputs, epsilon=0.1):
