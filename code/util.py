@@ -77,7 +77,7 @@ def transformer_prepare_decoder(targets, hparams, features=None):
         decoder_padding = common_attention.embedding_to_padding(targets)
         decoder_self_attention_bias = (
             common_attention.attention_bias_ignore_padding(decoder_padding))
-            
+
     if hparams.proximity_bias:
         decoder_self_attention_bias += common_attention.attention_bias_proximal(
             common_layers.shape_list(targets)[1])
@@ -86,6 +86,311 @@ def transformer_prepare_decoder(targets, hparams, features=None):
         decoder_input)
 
     return (decoder_input, decoder_self_attention_bias)
+
+
+def layer_norm_vars(filters):
+    """Create Variables for layer norm."""
+    scale = tf.get_variable(
+        "layer_norm_scale", [filters], initializer=tf.ones_initializer())
+    bias = tf.get_variable(
+        "layer_norm_bias", [filters], initializer=tf.zeros_initializer())
+    return scale, bias
+
+
+def layer_norm_compute(x, epsilon, scale, bias):
+    """Layer norm raw computation."""
+    epsilon, scale, bias = [cast_like(t, x) for t in [epsilon, scale, bias]]
+    mean = tf.reduce_mean(x, axis=[-1], keepdims=True)
+    variance = tf.reduce_mean(tf.square(x - mean), axis=[-1], keepdims=True)
+    norm_x = (x - mean) * tf.rsqrt(variance + epsilon)
+    return norm_x * scale + bias
+
+
+def layer_norm(x, filters=None, epsilon=1e-6, name=None, reuse=None):
+    """Layer normalize the tensor x, averaging over the last dimension."""
+    if filters is None:
+        filters = shape_list(x)[-1]
+    with tf.variable_scope(
+            name, default_name="layer_norm", values=[x], reuse=reuse):
+        scale, bias = layer_norm_vars(filters)
+        return layer_norm_compute(x, epsilon, scale, bias)
+
+
+def group_norm(x, filters=None, num_groups=8, epsilon=1e-5):
+    """Group normalization as in https://arxiv.org/abs/1803.08494."""
+    x_shape = shape_list(x)
+    if filters is None:
+        filters = x_shape[-1]
+    assert len(x_shape) == 4
+    assert filters % num_groups == 0
+    # Prepare variables.
+    scale = tf.get_variable(
+        "group_norm_scale", [filters], initializer=tf.ones_initializer())
+    bias = tf.get_variable(
+        "group_norm_bias", [filters], initializer=tf.zeros_initializer())
+    epsilon, scale, bias = [cast_like(t, x) for t in [epsilon, scale, bias]]
+    # Reshape and compute group norm.
+    x = tf.reshape(x, x_shape[:-1] + [num_groups, filters // num_groups])
+    # Calculate mean and variance on heights, width, channels (not groups).
+    mean, variance = tf.nn.moments(x, [1, 2, 4], keep_dims=True)
+    norm_x = (x - mean) * tf.rsqrt(variance + epsilon)
+    return tf.reshape(norm_x, x_shape) * scale + bias
+
+
+def noam_norm(x, epsilon=1.0, name=None):
+    """One version of layer normalization."""
+    with tf.name_scope(name, default_name="noam_norm", values=[x]):
+        shape = x.get_shape()
+        ndims = len(shape)
+        return (tf.nn.l2_normalize(x, ndims - 1, epsilon=epsilon) * tf.sqrt(
+            tf.to_float(shape[-1])))
+
+
+def l2_norm(x, filters=None, epsilon=1e-6, name=None, reuse=None):
+    """Layer normalization with l2 norm."""
+    if filters is None:
+        filters = shape_list(x)[-1]
+    with tf.variable_scope(name, default_name="l2_norm", values=[x], reuse=reuse):
+        scale = tf.get_variable(
+            "l2_norm_scale", [filters], initializer=tf.ones_initializer())
+        bias = tf.get_variable(
+            "l2_norm_bias", [filters], initializer=tf.zeros_initializer())
+        epsilon, scale, bias = [cast_like(t, x)
+                                for t in [epsilon, scale, bias]]
+        mean = tf.reduce_mean(x, axis=[-1], keepdims=True)
+        l2norm = tf.reduce_sum(tf.square(x - mean), axis=[-1], keepdims=True)
+        norm_x = (x - mean) * tf.rsqrt(l2norm + epsilon)
+        return norm_x * scale + bias
+
+
+def apply_norm(x, norm_type, depth, epsilon):
+    """Apply Normalization."""
+    if norm_type == "layer":
+        return layer_norm(x, filters=depth, epsilon=epsilon)
+    if norm_type == "group":
+        return group_norm(x, filters=depth, epsilon=epsilon)
+    if norm_type == "batch":
+        return tf.layers.batch_normalization(x, epsilon=epsilon)
+    if norm_type == "noam":
+        return noam_norm(x, epsilon)
+    if norm_type == "l2":
+        return l2_norm(x, filters=depth, epsilon=epsilon)
+    if norm_type == "none":
+        return x
+    raise ValueError("Parameter normalizer_fn must be one of: 'layer', 'batch',"
+                     "'noam', 'lr', 'none'.")
+
+
+def zero_add(previous_value, x, name=None, reuse=None):
+    """Resnet connection with zero initialization.
+
+    Another type of resnet connection which returns previous_value + gamma * x.
+    gamma is a trainable scalar and initialized with zero. It is useful when a
+    module is plugged into a trained model and we want to make sure it matches the
+    original model's performance.
+
+    Args:
+      previous_value:  A tensor.
+      x: A tensor.
+      name: name of variable scope; defaults to zero_add.
+      reuse: reuse scope.
+
+    Returns:
+      previous_value + gamma * x.
+    """
+    with tf.variable_scope(name, default_name="zero_add", reuse=reuse):
+        gamma = tf.get_variable(
+            "gamma", (), initializer=tf.zeros_initializer())
+        return previous_value + gamma * x
+
+
+def layer_prepostprocess(previous_value,
+                         x,
+                         sequence,
+                         dropout_rate,
+                         norm_type,
+                         depth,
+                         epsilon,
+                         default_name,
+                         name=None,
+                         dropout_broadcast_dims=None):
+    """Apply a sequence of functions to the input or output of a layer.
+
+    The sequence is specified as a string which may contain the following
+    characters:
+      a: add previous_value
+      n: apply normalization
+      d: apply dropout
+      z: zero add
+
+    For example, if sequence=="dna", then the output is
+      previous_value + normalize(dropout(x))
+
+    Args:
+      previous_value: A Tensor, to be added as a residual connection ('a')
+      x: A Tensor to be transformed.
+      sequence: a string.
+      dropout_rate: a float
+      norm_type: a string (see apply_norm())
+      depth: an integer (size of last dimension of x).
+      epsilon: a float (parameter for normalization)
+      default_name: a string
+      name: a string
+      dropout_broadcast_dims:  an optional list of integers less than 3
+        specifying in which dimensions to broadcast the dropout decisions.
+        saves memory.
+
+    Returns:
+      a Tensor
+    """
+    with tf.variable_scope(name, default_name=default_name):
+        if sequence == "none":
+            return x
+        for c in sequence:
+            if c == "a":
+                x += previous_value
+            elif c == "z":
+                x = zero_add(previous_value, x)
+            elif c == "n":
+                x = apply_norm(x, norm_type, depth, epsilon)
+            else:
+                assert c == "d", ("Unknown sequence step %s" % c)
+                x = dropout_with_broadcast_dims(
+                    x, 1.0 - dropout_rate, broadcast_dims=dropout_broadcast_dims)
+        return x
+
+
+def comma_separated_string_to_integer_list(s):
+    return [int(i) for i in s.split(",") if i]
+
+
+def layer_preprocess(layer_input, hparams):
+    """Apply layer preprocessing.
+
+    See layer_prepostprocess() for details.
+
+    A hyperparameters object is passed for convenience.  The hyperparameters
+    that may be used are:
+
+      layer_preprocess_sequence
+      layer_prepostprocess_dropout
+      norm_type
+      hidden_size
+      norm_epsilon
+
+    Args:
+      layer_input: a Tensor
+      hparams: a hyperparameters object.
+
+    Returns:
+      a Tensor
+    """
+    assert "a" not in hparams.layer_preprocess_sequence, (
+        "No residual connections allowed in hparams.layer_preprocess_sequence")
+    assert "z" not in hparams.layer_preprocess_sequence, (
+        "No residual connections allowed in hparams.layer_preprocess_sequence")
+    return layer_prepostprocess(
+        None,
+        layer_input,
+        sequence=hparams.layer_preprocess_sequence,
+        dropout_rate=hparams.layer_prepostprocess_dropout,
+        norm_type=hparams.norm_type,
+        depth=None,
+        epsilon=hparams.norm_epsilon,
+        dropout_broadcast_dims=comma_separated_string_to_integer_list(
+            getattr(hparams, "layer_prepostprocess_dropout_broadcast_dims", "")),
+        default_name="layer_prepostprocess")
+
+
+def layer_postprocess(layer_input, layer_output, hparams):
+    """Apply layer postprocessing.
+
+    See layer_prepostprocess() for details.
+
+    A hyperparameters object is passed for convenience.  The hyperparameters
+    that may be used are:
+
+      layer_postprocess_sequence
+      layer_prepostprocess_dropout
+      norm_type
+      hidden_size
+      norm_epsilon
+
+    Args:
+      layer_input: a Tensor
+      layer_output: a Tensor
+      hparams: a hyperparameters object.
+
+    Returns:
+      a Tensor
+    """
+    return layer_prepostprocess(
+        layer_input,
+        layer_output,
+        sequence=hparams.layer_postprocess_sequence,
+        dropout_rate=hparams.layer_prepostprocess_dropout,
+        norm_type=hparams.norm_type,
+        depth=None,
+        epsilon=hparams.norm_epsilon,
+        dropout_broadcast_dims=comma_separated_string_to_integer_list(
+            getattr(hparams, "layer_prepostprocess_dropout_broadcast_dims", "")),
+        default_name="layer_postprocess")
+
+
+def _extract_layer_types(hparams):
+    SEP_ENCODEC = "#"
+    SEP_LAYER = "/"
+    SEP_FF = "-"
+    """Parse the layer string.
+
+    Returns:
+      list[tuple[str, str]]: Encoder layers: list of (attention, feed-forward)
+      list[tuple[str, str, str]]: Decoder layers: list of (self-attention,
+        enc-dec attention, feed-forward)
+    """
+    hparams = hparams
+    layer_types = hparams.layer_types
+
+    # If the architecture has not explicitly been set, we just construct a
+    # standard transformer with the fallback values
+    if not layer_types:
+        layer_types = SEP_LAYER.join(
+            [hparams.default_att] * hparams.num_hidden_layers)
+
+    # If encoder not explicitly defined, the encoder will have the same
+    # structure as the decoder
+    layer_types = layer_types.split(SEP_ENCODEC)
+    if len(layer_types) == 1:
+        layer_types *= 2
+
+    # Some models don't need the encoder (ex: language modeling)
+    # TODO(epot): What are the other conditions (has_input ?)
+    if hparams.prepend_mode != "none":
+        layer_types[0] = ""
+
+    # Extend the blocks and fill them with the default values if not specified
+    final_layers = ([], [])
+    for i, blocks_str_joined in enumerate(layer_types):
+        for blocks_str in blocks_str_joined.split(SEP_LAYER):
+            if not blocks_str:
+                continue
+            blocks_list = blocks_str.split(SEP_FF)
+            # Eventually use the fallback values for the layer_types. If the
+            # encoder is empty, do not use the enco-deco attention.
+            self_att = blocks_list[0] or hparams.default_att
+            ende_att = hparams.default_att if layer_types[0] else "_"
+            ff = hparams.default_ff
+            if len(blocks_list) > 1:
+                ff = blocks_list[-1]
+            if len(blocks_list) == 3:
+                ende_att = blocks_list[1]
+            if i == 0:  # Encoder
+                blocks_tuple = (self_att, ff)
+            elif i == 1:  # Decoder
+                blocks_tuple = (self_att, ende_att, ff)
+            final_layers[i].append(blocks_tuple)
+
+    return final_layers
 
 
 def conv_internal(conv_fn, inputs, filters, kernel_size, **kwargs):

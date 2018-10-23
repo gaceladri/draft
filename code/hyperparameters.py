@@ -31,3 +31,4 @@ tf.flags.DEFINE_integer("min_repeats", 1,
 tf.flags.DEFINE_integer("max_repeats", 2,
                         "Upper limit on number of copy repeats.")
 
+hparams = []

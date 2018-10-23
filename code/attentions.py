@@ -1,8 +1,16 @@
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
 import tensorflow as tf
-from dnc.util import cast_like, dropout_with_broadcast_dims, should_generate_summaries, shape_list
-from dnc.util import _generate_relative_positions_embeddings, _relative_attention_inner, _relative_position_to_absolute_position_masked
-from dnc.util import _absolute_position_to_relative_position_masked, attention_bias_lower_triangle, ones_matrix_band_part
-from dnc.util import gather_dilated_memory_blocks, reshape_by_blocks, embedding_to_padding
+import functools
+import collections
+
+from code.util import cast_like, dropout_with_broadcast_dims, should_generate_summaries, shape_list
+from code.util import _generate_relative_positions_embeddings, _relative_attention_inner, _relative_position_to_absolute_position_masked
+from code.util import _absolute_position_to_relative_position_masked, attention_bias_lower_triangle, ones_matrix_band_part
+from code.util import gather_dilated_memory_blocks, reshape_by_blocks, embedding_to_padding
+from code.util import add_name_scope, add_var_scope
 
 
 def dot_product_attention(q,
@@ -188,6 +196,107 @@ def dot_product_self_attention_relative_v2(q,
         depth_v = shape_list(v)[3]
         ret += tf.layers.dense(relative_weights, depth_v, name="rel1")
         return ret
+
+
+BatchInfo = collections.namedtuple("BatchInfo", "coordinates, order")
+
+
+@add_name_scope()
+def sparse_dot_product_attention(q, k, v, bi, use_map_fn, experts_params):
+    """Sparse multihead self attention.
+
+    Perform an approximation of the full multihead attention by dispatching
+    the tokens using their keys/values. Thus the attention matrix are only
+    computed each times on a subset of the tokens.
+
+    Notes:
+        * The funciton don't perform scaling here (multihead_attention does
+        the /sqrt(depth)).
+        * The padding should have been removed (so batch size should be 1 but length
+        contains the elements from al different batches)
+        * Right now, only self attention is supported so length_q and length_kv
+        should be identical and the function will add triangular mask.
+        * If bi.order is not None, The bias is added inside this function to
+        prevent attention to the future.
+
+     Args:
+        q (tf.Tensor): Queries of shape [batch, heads, length_q, depth_k]
+        k (tf.Tensor): Keys of shape [batch, heads, length_q, depth_k]
+        v (tf.Tensor): Values of shape [batch, heads, length_kv, depth_v]
+        bi (BatchInfo): Contains the batch coordinates and sequence order
+        use_map_fn (bool): Use either tf.map_fn of python for loop to compute the
+        heads separately
+        experts_params (dict): Additional params for the local expert
+
+    Returns:
+        tf.Tensor: Approximation of Softmax(Q.K) * V, of shape
+          [batch, heads, length_q, depth_v]
+    """
+    batch_size, nb_heads, _, depth = shape_list(q)
+
+    @add_name_scope()
+    def flatten_first_dims(x):
+        """Reshape such that x is [num_heads, -1, depth]."""
+        # Case 1: Either constant batch size of size 1 or batch already flattened
+        if x.get_shape().as_list()[0] == 1:
+            return tf.squeeze(x, axis=0)
+
+        # Case 2: Flatten batch dimension
+        x = tf.transpose(x, perm=[1, 0, 2, 3])
+        x = tf.reshape(x, [nb_heads, -1, depth])
+        return x
+
+    def flatten_batch(x):
+        if x is None:
+            return x
+        return flatten_all_but_last(x)
+
+    q = flatten_first_dims(q)
+    k = flatten_first_dims(k)
+    v = flatten_first_dims(v)
+    bi = BatchInfo(
+        coordinates=flatten_batch(bi.coordinates),
+        order=flatten_batch(bi.order))
+
+    # Unstack heads
+    list_q = tf.unstack(q)  # list[tf.Tensor(shape=batch * length, depth)]
+    list_k = tf.unstack(k)
+    list_v = tf.unstack(v)
+
+    list_gates_q = []
+    list_gates_k = []
+
+    total_loss = 0.0
+    # There might be a more optimized way to compute all heads at once
+    for single_q, single_k, _ in zip(list_q, list_k, list_v):
+        # Each head get its own dispatcher
+        lsh_gating = LshGating(
+            depth=single_k.get_shape().as_list()[-1], **experts_params)
+
+        list_gates_q.append(lsh_gating.get_gates(single_q))
+        list_gates_k.append(lsh_gating.get_gates(single_k))
+
+    gates_q = tf.stack(list_gates_q)
+    gates_k = tf.stack(list_gates_k)
+
+    # Process each head separately.
+    v_out = map_fn_switch(
+        lambda args: dot_product_single_head(bi=bi, *args),
+        elems=(q, k, v, gates_q, gates_k),
+        dtype=(tf.float32),
+        parallel_iterations=2,
+        use_map_fn=use_map_fn)
+
+    # Restore original shape as expected by multihead_attention
+    if isinstance(batch_size, int) and batch_size == 1:
+        v_out = tf.expand_dims(v_out, axis=0)  # Restore batch_size = 1
+    else:
+        v_out = tf.reshape(v_out, [nb_heads, batch_size, -1, depth])
+        v_out = tf.transpose(v_out, [1, 0, 2, 3])
+    return v_out, total_loss / nb_heads
+
+multihead_attention_sparse_dot_prod = functools.partial(
+    multihead_attention, attention_type=sparse_dot_product_attention)
 
 
 def masked_within_block_local_attention_1d(q, k, v, block_length=64, name=None):

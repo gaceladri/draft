@@ -27,19 +27,16 @@ import numpy as np
 import sonnet as snt
 import tensorflow as tf
 
-from dnc import access
-from dnc import util
-
-from tensor2tensor.layers import common_attention
-from tensor2tensor.layers import common_layers
+from code.pruebas import transformer as pruebas_transformer
+from code import util, hyperparameters
 from tensor2tensor.models import transformer
-from tensor2tensor.utils import expert_utils
-from tensor2tensor.models.research import universal_transformer_util
-#from tensor2tensor.models.research import universal_transformer
 
 
 DNCState = collections.namedtuple('DNCState', ('access_output', 'access_state',
                                                'controller_state'))
+
+hparams = hyperparameters.hparams
+encoder_layers, decoder_layers = util._extract_layer_types(hparams)
 
 
 class DNCTransformer(snt.RNNCore, transformer.Transformer):
@@ -49,6 +46,8 @@ class DNCTransformer(snt.RNNCore, transformer.Transformer):
     """
 
     def __init__(self,
+                 inputs,
+                 targets,
                  features,
                  access_config,
                  controller_config,
@@ -70,8 +69,8 @@ class DNCTransformer(snt.RNNCore, transformer.Transformer):
             than KeyValueMemory.
         """
         super(DNCTransformer, self).__init__(name=name)
-        
-        with self._enter_variable_scope():        
+
+        with self._enter_variable_scope():
             self._access = access.MemoryAccess(**access_config)
             self._controller = self.body(
                 **controller_config)
@@ -85,101 +84,6 @@ class DNCTransformer(snt.RNNCore, transformer.Transformer):
             access_output=self._access_output_size,
             access_state=self._access.state_size,
             controller_state=self._controller())
-
-    def encode(self, inputs, target_space, hparams, features=None, losses=None):
-        """Encode Universal Transformer inputs.
-
-        It is similar to "transformer.encode", but it uses
-        "universal_transformer_util.universal_transformer_encoder" instead of
-        "transformer.transformer_encoder".
-
-        Args:
-        inputs: Transformer inputs [batch_size, input_length, input_height,
-            hidden_dim] which will be flattened along the two spatial dimensions.
-        target_space: scalar, target space ID.
-        hparams: hyperparmeters for model.
-        features: optionally pass the entire features dictionary as well.
-            This is needed now for "packed" datasets.
-        losses: Unused.
-
-        Returns:
-        Tuple of:
-            encoder_output: Encoder representation.
-                [batch_size, input_length, hidden_dim]
-            encoder_decoder_attention_bias: Bias and mask weights for
-                encoder-decoder attention. [batch_size, input_length]
-            encoder_extra_output: which is extra encoder output used in some
-                variants of the model (e.g. in ACT, to pass the ponder-time to body)
-        """
-        del losses
-
-        inputs = common_layers.flatten4d3d(inputs)
-
-        encoder_input, self_attention_bias, encoder_decoder_attention_bias = (
-            transformer.transformer_prepare_encoder(
-                inputs, target_space, hparams, features=features))
-
-        encoder_input = tf.nn.dropout(encoder_input,
-                                      1.0 - hparams.layer_prepostprocess_dropout)
-
-        (encoder_output, encoder_extra_output) = (
-            universal_transformer_util.universal_transformer_encoder(
-                encoder_input,
-                self_attention_bias,
-                hparams,
-                nonpadding=transformer.features_to_nonpadding(
-                    features, "inputs"),
-                save_weights_to=self.attention_weights))
-
-        return encoder_output, encoder_decoder_attention_bias, encoder_extra_output
-
-    def decode(self, decoder_input, encoder_output, encoder_decoder_attention_bias, decoder_self_attention_bias,
-               hparams, cache=None, nonpadding=None, losses=None):
-        """Decode Universal Transformer outputs from encoder representation.
-
-        It is similar to "transformer.decode", but it uses
-        "universal_transformer_util.universal_transformer_decoder" instead of
-        "transformer.transformer_decoder".
-
-        Args:
-        decoder_input: inputs to bottom of the model. [batch_size, decoder_length,
-            hidden_dim]
-        encoder_output: Encoder representation. [batch_size, input_length,
-            hidden_dim]
-        encoder_decoder_attention_bias: Bias and mask weights for encoder-decoder
-            attention. [batch_size, input_length]
-        decoder_self_attention_bias: Bias and mask weights for decoder
-            self-attention. [batch_size, decoder_length]
-        hparams: hyperparmeters for model.
-        cache: Unimplemented.
-        nonpadding: optional Tensor with shape [batch_size, decoder_length]
-        losses: Unused.
-
-        Returns:
-        Tuple of:
-            Final decoder representation. [batch_size, decoder_length,
-                hidden_dim]
-            encoder_extra_output: which is extra encoder output used in some
-                variants of the model (e.g. in ACT, to pass the ponder-time to body)
-
-        """
-        del losses
-        del cache
-
-        decoder_input = tf.nn.dropout(decoder_input,
-                                      1.0 - hparams.layer_prepostprocess_dropout)
-
-        (decoder_output, dec_extra_output) = (
-            universal_transformer_util.universal_transformer_decoder(
-                decoder_input,
-                encoder_output,
-                decoder_self_attention_bias,
-                encoder_decoder_attention_bias,
-                hparams,
-                nonpadding=nonpadding,
-                save_weights_to=self.attention_weights))
-
-        return tf.expand_dims(decoder_output, axis=2), dec_extra_output
 
     def body(self, features):
         """Universal Transformer main model_fn.
