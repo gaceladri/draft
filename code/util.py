@@ -950,6 +950,86 @@ class SparseDispatcher(object):
         return self._part_sizes_tensor
 
 
+class LshGating(object):
+    """Class to split key/queries into separate buckets."""
+
+    def __init__(self, depth, nb_hyperplanes, nb_replicat=1, trainable=False):
+        """Construct the gating function parameters.
+
+        Compute the gates for a single head.
+
+        Args:
+          depth (int): Dimension of the key/queries to dispatch
+          nb_hyperplanes (int): Nb of vectors use to split the space. Will determine
+            the number of buckets (2^nb_hyperplanes - 1).
+          nb_replicat (int): Redundancy to avoid the edge cases (to be in one bucket
+            the input should be in a majority)
+          trainable (bool): If True, a balance loss is added to force the hyperplane
+            to divide the key/query space evenly
+        """
+        self.depth = depth
+        self.nb_hyperplanes = nb_hyperplanes
+        self.nb_buckets = 2**nb_hyperplanes
+        self.nb_replicat = nb_replicat  # Unused for now
+        self.trainable = trainable  # Unused for now
+
+        self.dispatchers = {}
+
+        assert self.nb_replicat == 1  # For now
+
+        with tf.variable_scope("lsh_gating"):
+            # Vectors defining the hyperplanes
+            self.t_vectors = tf.get_variable(
+                "vector",
+                shape=(self.depth, self.nb_hyperplanes * self.nb_replicat),
+                dtype=tf.float32,
+                trainable=self.trainable,
+            )
+            # Projection vector from the bit space to similarity score space
+            self.t_group = tf.constant(
+                [self._idx_to_bits(i) for i in range(self.nb_buckets)],
+                dtype=tf.float32,
+                name="group")
+
+    def _idx_to_bits(self, i):
+        """Convert an group index to its bit representation."""
+        bits = bin(i)[2:].zfill(self.nb_hyperplanes)  # Pad the bits str with 0
+        return [-1.0 if b == "0" else 1.0 for b in bits]
+
+    @add_name_scope("lsh_gating")
+    def get_gates(self, x):
+        """Return the bucket id of the given tensor.
+
+        Args:
+          x (tf.Tensor): float32 of shape [length, depth]
+
+        Returns:
+          tf.Tensor: One-hot vector int64 of shape [heads, length, nb_buckets]
+            containing the id of the bucket
+        """
+
+        # The balance loss don't propagate to the rest of the network
+        x = tf.stop_gradient(x)
+        # [length, depth] * [depth, nb_vectors * replicat]
+        x = tf.matmul(x, self.t_vectors)
+        # [length, nb_vector * replicat]
+        x = tf.sign(x)  # Get on which side of the hyperplane the keys are.
+
+        # x = tf.reshape(x, [-1, nb_replicat, nb_vector])
+        # [length, replicat, nb_vector] * [nb_vector, 2^nb_vector - 1]
+
+        x = tf.matmul(x, self.t_group, transpose_b=True) / self.nb_hyperplanes
+        # We get a similarity score for each of the group between [-1, 1]
+        # [length, (replicat,) 2^nb_vector - 1]
+        # Do an argmax to get the most likely group for each replicat
+        x = tf.argmax(x, axis=-1)
+        # [length(, replicat)]
+        # One-hot for compatibility with the sparse dispatcher
+        x = tf.one_hot(x, self.nb_buckets)
+        # TODO(epot): Use a loss to force an even distribution
+        return x
+
+
 def should_generate_summaries():
     """Is this an appropiate context to generate summaries.
 

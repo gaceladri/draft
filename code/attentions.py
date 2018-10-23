@@ -9,7 +9,7 @@ import collections
 from code.util import cast_like, dropout_with_broadcast_dims, should_generate_summaries, shape_list
 from code.util import _generate_relative_positions_embeddings, _relative_attention_inner, _relative_position_to_absolute_position_masked
 from code.util import _absolute_position_to_relative_position_masked, attention_bias_lower_triangle, ones_matrix_band_part
-from code.util import gather_dilated_memory_blocks, reshape_by_blocks, embedding_to_padding
+from code.util import gather_dilated_memory_blocks, reshape_by_blocks, embedding_to_padding, flatten_all_but_last
 from code.util import add_name_scope, add_var_scope
 
 
