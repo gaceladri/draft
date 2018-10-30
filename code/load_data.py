@@ -3,7 +3,9 @@ import pandas as pd
 import numpy as np
 import numba
 
-def read_data(self):
+from sklearn.preprocessing import MinMaxScaler
+
+def read_data():
     
   training_data = pd.read_csv('./consumption_train.csv', index_col=0, parse_dates=['timestamp'])
   test_data = pd.read_csv('./cold_start_test.csv', index_col=0, parse_dates=['timestamp'])
@@ -15,7 +17,7 @@ def read_data(self):
 
   return training_data, test_data, submision_format, pred_windows
       
-def _count_cold_start_days(self, subdf):
+def _count_cold_start_days(subdf):
   """
   Get the number of times a certain cold-start period appears in the data.
   """
@@ -24,7 +26,7 @@ def _count_cold_start_days(self, subdf):
               .divide(24)
               .value_counts())
 
-def create_lagged_features(self, df, lag=1):
+def create_lagged_features(df, lag=1, dropna=True):
   if not type(df) == pd.DataFrame:
       df = pd.DataFrame(df, columns=['consumption'])
   
@@ -35,8 +37,8 @@ def create_lagged_features(self, df, lag=1):
   # add a column lagged by 'i' steps
   for i in range(1, lag + 1):
       df = df.join(df.consumption.shift(i).pipe(_rename_lag, i))
-
-  df.dropna(inplace=True)
+  if dropna:  
+      df.dropna(inplace=True)
   return df
 
 def prepare_training_data(consumption_series, lag):
@@ -44,8 +46,8 @@ def prepare_training_data(consumption_series, lag):
   Converts a series of consumption data into a lagged, scaled sample.
   """
   # Scale training data
-  scaler = MinMaxScaler(feature_range=(0,1))
-  consumption_vals = scaler.fit_transform(consumption_series.values.reshape(0,1))
+  scaler = MinMaxScaler(feature_range=(-1, 1))  #Test (0, 1) and (-1, 1)
+  consumption_vals = scaler.fit_transform(consumption_series.values.reshape(-1, 1))   #Test (0, 1) and (-1, 1)
 
   # Convert consumption series to lagged features
   consumption_lagged = create_lagged_features(consumption_vals, lag=lag)

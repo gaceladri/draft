@@ -1,13 +1,19 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
+
 from code.util import transformer_prepare_encoder, transformer_prepare_decoder
 from code.util import _extract_layer_types, add_name_scope, add_var_scope, layer_preprocess, layer_postprocess
 from code.hyperparameters import hparams
-from tensor2tensor.layers.common_attention import get_standarized_layers
-from tensor2tensor import common_attention, common_layers
+from tensor2tensor.layers.common_attention import get_standardized_layers
+from tensor2tensor.layers import common_attention, common_layers
 
 import tensorflow as tf
+import code.load_data as data_module
+
+hparams = hparams
+enc_layers = hparams.enc_layers
+dec_layers = hparams.dec_layers
 
 cache = dict(extra_loss=0.0)
 
@@ -16,7 +22,6 @@ def preprocess(x, hparams):
     return layer_preprocess(x, hparams)
 
 
-# no norm no drop no nothing
 def prepostprocess(fct):
     """Apply processing and capture the extra loss."""
     @add_var_scope()
@@ -28,7 +33,32 @@ def prepostprocess(fct):
     return decorated
 
 
-layers = get_standarized_layers()
+layers = get_standardized_layers(hparams)
+
+
+class Graph():
+    def __init__(self, is_training=True):
+        self.graph = tf.Graph()
+        with self.graph.as_default():
+            if is_training:
+                self.training_data, self.test_data, self.sub_format, self.pred_windows = data_module.read_data()
+            else:
+                self.x = tf.placeholder(
+                    tf.float32, shape=(None, hparams.maxlen))
+                self.y = tf.placeholder(
+                    tf.float32, shape=(None, hparams.maxlen))
+
+            pred_window = 
+            num_preds = 
+            num_pred_hours = 
+            for ser_id, ser_data in self.training_data.groupby('series_id'):
+                train_series = self.training_data[self.training_data.series_id == ser_id]
+                self._X, self._y, self.scaler = data_module.prepare_training_data(
+                    ser_data.consumption, 15)
+
+                transformer = transformer(
+                    self._X, self._y, enc_layers, dec_layers, hparams)
+                self.logits = tf.layers.dense(self.dec, num_pred_hours)
 
 
 def transformer(inputs, targets, encoder_layers, decoder_layers, hparams):
