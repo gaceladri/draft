@@ -155,11 +155,11 @@ def transformer_model(input_tensor,
 
                 # The activation is only applied to the "intermediate" hidden layer.
                 with tf.variable_scope("intermediate"):
-                    intermediate_output = tf.layers.dense(
-                        attention_output,
-                        intermediate_size,
-                        activation=intermediate_act_fn,
-                        kernel_initializer=create_initializer(initializer_range))
+                    intermediate_output = eu.local_moe(
+                        x=attention_output,
+                        train=train,
+                        expert_fn=functools.partial(
+                            ca.self_attention_expert, mask_right=False, )
 
                 # Down-project back to `hidden_size` then add the residual.
                 with tf.variable_scope("output"):
@@ -217,11 +217,11 @@ def transformer_model(input_tensor,
 
                 # The activation is only applied to the "intermediate" hidden layer.
                 with tf.variable_scope("intermediate"):
-                    intermediate_output = tf.layers.dense(
-                        attention_output,
-                        intermediate_size,
-                        activation=intermediate_act_fn,
-                        kernel_initializer=create_initializer(initializer_range))
+                    intermediate_output = eu.local_moe(
+                        x=attention_output,
+                        train=train,
+                        expert_fn=functools.partial(
+                            ca.self_attention_expert, mask_right=False, )
 
                 # Down-project back to `hidden_size` then add the residual.
                 with tf.variable_scope("output"):
