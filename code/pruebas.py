@@ -6,9 +6,10 @@ import tensorflow as tf
 import functools
 import code.load_data as data_module
 
-from util import attention_layer
+from util import attention_layer, get_shape_list
 from tensor2tensor.utils import expert_utils as eu
 from tensor2tensor.layers import common_attention as ca
+
 
 class Graph():
     def __init__(self, is_training=True):
@@ -30,13 +31,90 @@ class Graph():
                 self._X, self._y, self.scaler = data_module.prepare_training_data(
                     ser_data.consumption, 15)
 
-                transformer = transformer(
+                transformer = transformer_model(
                     self._X, self._y, enc_layers, dec_layers, hparams)
                 self.logits = tf.layers.dense(self.dec, num_pred_hours)
 
-    def create_model(transformer_config, is_training, input_ids, input_mask, segment_ids,
+    def create_model(config, is_training, input_ids, input_mask, segment_ids,
                      labels, num_labels):
         model = transformer()
+
+
+class BertModel(object):
+    """BERT model ("Bidirectional Embedding Representations from a Transformer").
+
+    Example usage:
+
+    ```python
+    # Already been converted into WordPiece token ids
+    input_ids = tf.constant([[31, 51, 99], [15, 5, 0]])
+    input_mask = tf.constant([[1, 1, 1], [1, 1, 0]])
+    token_type_ids = tf.constant([[0, 0, 1], [0, 2, 0]])
+
+    config = modeling.BertConfig(vocab_size=32000, hidden_size=512,
+        num_hidden_layers=8, num_attention_heads=6, intermediate_size=1024)
+
+    model = modeling.BertModel(config=config, is_training=True,
+        input_ids=input_ids, input_mask=input_mask, token_type_ids=token_type_ids)
+
+    label_embeddings = tf.get_variable(...)
+    pooled_output = model.get_pooled_output()
+    logits = tf.matmul(pooled_output, label_embeddings)
+    ...
+    ```
+    """
+
+    def __init__(self,
+                 config,
+                 is_training,
+                 input_ids,
+                 input_mask=None,
+                 token_type_ids=None,
+                 use_one_hot_embeddings=True,
+                 scope=None):
+    """Constructor for BertModel.
+
+    Args:
+      config: `BertConfig` instance.
+      is_training: bool. rue for training model, false for eval model. Controls
+        whether dropout will be applied.
+      input_ids: int32 Tensor of shape [batch_size, seq_length].
+      input_mask: (optional) int32 Tensor of shape [batch_size, seq_length].
+      token_type_ids: (optional) int32 Tensor of shape [batch_size, seq_length].
+      use_one_hot_embeddings: (optional) bool. Whether to use one-hot word
+        embeddings or tf.embedding_lookup() for the word embeddings. On the TPU,
+        it is must faster if this is True, on the CPU or GPU, it is faster if
+        this is False.
+      scope: (optional) variable scope. Defaults to "bert".
+
+    Raises:
+      ValueError: The config is invalid or one of the input tensor shapes
+        is invalid.
+    """
+    config = copy.deepcopy(config)
+    if not is_training:
+        config.hidden_dropout_prob = 0.0
+        config.attention_probs_dropout_prob = 0.0
+
+    input_shape = get_shape_list(input_ids, expected_rank=3)
+    batch_size = input_shape[0]
+    seq_length = input_shape[1]
+    features_size = input_shape[2]
+
+    if input_mask is None:
+        input_mask = tf.ones(shape=[batch_size, seq_length, features_size], dtype=tf.int32)
+
+    if token_type_ids is None:
+        token_type_ids = tf.zeros(
+            shape=[batch_size, seq_length, features_size], dtype=tf.int32)
+
+    with tf.variable_scope("encoder"):
+        attention_mask = create_attention_mask_from_input_mask(
+            input_ids, input_mask)
+        
+        self.all_encoder_layers = transformer_model(
+            input_tensor=
+        )
 
 
 def transformer_model(input_tensor,
