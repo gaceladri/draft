@@ -82,10 +82,10 @@ def transformer_model(input_tensor,
     # help the optimizer.
     prev_output = reshape_to_matrix(input_tensor)
 
-    #TODO: after first test that the model runs, change the variable scope to share weigths between
+    # TODO: after first test that the model runs, change the variable scope to share weigths between
     #  Time-Series (as a transfer learning method)
 
-    #TODO: check the attention bias and check the encodeco_input_bias from original model
+    # TODO: check the attention bias and check the encodeco_input_bias from original model
     with tf.variable_scope("encoder"):
         all_encoder_outputs = []
         for layer_idx in range(num_hidden_layers):
@@ -148,8 +148,8 @@ def transformer_model(input_tensor,
                         enc_output + attention_output)
                     prev_output_enc = enc_output
                     all_encoder_outputs.append(layer_output_enc)
-    
-    #TODO: check the attention bias and check the deco_input_bias from original model
+
+    # TODO: check the attention bias and check the deco_input_bias from original model
     with tf.variable_scope("decoder"):
         all_decoder_outputs = []
         for layer_idx in range(num_hidden_layers):
@@ -247,7 +247,7 @@ class Graph():
                 self._X, self._y, self.scaler = data_module.prepare_training_data(
                     ser_data.consumption, 15)
 
-                #transformer = transformer_model(
+                # transformer = transformer_model(
                 #    self._X, self._y, enc_layers, dec_layers, hparams)
                 self.logits = tf.layers.dense(self.dec, num_pred_hours)
 
@@ -320,10 +320,11 @@ def model_fn_builder(config, num_labels, init_checkpoint, learning_rate,
 
         output_spec = None
         if mode == tf.estimator.ModeKeys.TRAIN:
-            
+
             global_step = tf.train.get_or_create_global_step()
-            
-            learning_rate = tf.constant(value=learning_rate, shape=[], dtype=tf.float32)
+
+            learning_rate = tf.constant(
+                value=learning_rate, shape=[], dtype=tf.float32)
             # Implements linear decay of the learning rate.
             learning_rate = tf.train_polynomial_decay(
                 learning_rate,
@@ -332,18 +333,20 @@ def model_fn_builder(config, num_labels, init_checkpoint, learning_rate,
                 end_learning_rate=0.0,
                 power=1.0,
                 cycle=False)
-            
+
             if num_warmup_steps:
                 global_steps_int = tf.cast(global_step, tf.int32)
-                warmup_steps_int = tf.constant(num_warmup_steps, dtype=tf.int32)
+                warmup_steps_int = tf.constant(
+                    num_warmup_steps, dtype=tf.int32)
 
                 global_steps_float = tf.cast(global_steps_int, tf.float32)
                 warmup_steps_float = tf.cast(warmup_steps_int, tf.float32)
 
-                is_warmup = tf.cast(global_steps_int < warmup_steps_int, tf.float32)
+                is_warmup = tf.cast(global_steps_int <
+                                    warmup_steps_int, tf.float32)
                 learning_rate = (
                     (1.0 - is_warmup) * learning_rate + is_warmup * warmup_learning_rate)
-            
+
             # It is recommended that you use this optimizer for fine tuning, since this
             # is how the model was trained ( note that the Adam m/v variables are NOT
             # loaded from init_checkpoint. )
@@ -354,7 +357,7 @@ def model_fn_builder(config, num_labels, init_checkpoint, learning_rate,
                 beta_2=0.999,
                 epsilon=1e-6,
                 exclude_from_weight_decay=["LayerNorm", "layer_norm", "bias"])
-            
+
             tvars = tf.trainable_variables()
             grads = tf.gradients(loss, tvars)
 
@@ -363,10 +366,10 @@ def model_fn_builder(config, num_labels, init_checkpoint, learning_rate,
 
             train_op = optimizer.apply_gradients(
                 zip(grads, tvars), global_step=global_step)
-            
-            new_global_step = global_step + 1
-            train_op = tf.group(train_op, [global_step.assign(new_global_step)])
 
+            new_global_step = global_step + 1
+            train_op = tf.group(
+                train_op, [global_step.assign(new_global_step)])
 
             output_spec = tf.estimator.EstimatorSpec(
                 mode=mode,
@@ -375,13 +378,14 @@ def model_fn_builder(config, num_labels, init_checkpoint, learning_rate,
 
         elif mode == tf.estimator.ModeKeys.EVAL:
             def metric_fn(loss, labels, logits):
-                predictions = logits  #TODO: check that the output of logits is the desired prediction number
+                # TODO: check that the output of logits is the desired prediction number
+                predictions = logits
                 mae = tf.metrics.mean_absolute_error(labels, predictions)
                 loss = loss
                 return {
                     "eval_mae": mae,
                     "eval_loss": loss
-                }   #TODO: add more metrics
+                }  # TODO: add more metrics
 
             eval_metrics = (metric_fn, [loss, labels, logits])
             output_spec = tf.estimator.EstimatorSpec(
@@ -402,7 +406,7 @@ class BertModel(object):
     Example usage:
 
     ```python
-    
+
     input_ids = tf.constant([[31, 51, 99], [15, 5, 0]])
     input_mask = tf.constant([[1, 1, 1], [1, 1, 0]])
 
@@ -418,6 +422,7 @@ class BertModel(object):
     ...
     ```
     """
+
     def __init__(self,
                  config,
                  is_training,
@@ -449,18 +454,18 @@ class BertModel(object):
         batch_size = input_shape[0]
         seq_length = input_shape[1]
         features_size = input_shape[2]
-        
+
         # TODO: add positional timing signal. is that necesary when dealing with Time-series?
         if input_mask is None:
             input_mask = tf.ones(
-                shape=[batch_size, seq_length], dtype=tf.int32) #TODO: check the 3rd dimension
+                shape=[batch_size, seq_length], dtype=tf.int32)  # TODO: check the 3rd dimension
 
         if token_type_ids is None:
             token_type_ids = tf.zeros(
-                shape=[batch_size, seq_length], dtype=tf.int32) #TODO: check the 3rd dimension
+                shape=[batch_size, seq_length], dtype=tf.int32)  # TODO: check the 3rd dimension
 
         attention_mask = create_attention_mask_from_input_mask(
-            input_ids, input_mask) #TODO: adapt the att_mask to Time-series
+            input_ids, input_mask)  # TODO: adapt the att_mask to Time-series
 
         self.final_enc_outputs, self.final_deco_outputs = transformer_model(
             input_tensor=self._X,
